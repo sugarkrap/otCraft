@@ -14,3 +14,9 @@ log.txt
 *.dll
 *.pyc
 
+
+# piko port
+test-soft
+assets/*.bin
+assets/*.raw
+*.ppm

@@ -1,0 +1,85 @@
+# Makefile.piko -- otCraft for the Sharp Zaurus SL-C760/C860
+#
+# Kept separate from the upstream CMake build, which targets desktop
+# OpenGL and is left working for reference. Nothing here uses GL, GLFW,
+# GLEW, curl or lodepng.
+#
+# Toolchain: the crosstool-NG ARM EABI uClibc-ng toolchain from the
+# sibling piko repo. Build piko first if it is missing.
+#
+# Usage:
+#   make -f Makefile.piko assets     regenerate assets/ from textures/
+#   make -f Makefile.piko test       host build of the rasterizer harness
+#   make -f Makefile.piko run        ...and render a frame to /tmp
+#   make -f Makefile.piko check-toolchain
+#   make -f Makefile.piko clean
+
+# ── toolchain ────────────────────────────────────────────────────────────
+
+PIKO       := $(abspath ../piko)
+CROSS      ?= arm-unknown-linux-uclibcgnueabi
+CROSS_PATH ?= $(PIKO)/toolchain/x-tools/$(CROSS)/bin
+
+CC    := $(CROSS_PATH)/$(CROSS)-gcc
+STRIP := $(CROSS_PATH)/$(CROSS)-strip
+
+# PXA255 / XScale ARMv5TE, no hardware FPU, EABI soft-float. The ABI
+# itself comes from the toolchain; these control codegen.
+ARCHFLAGS := -march=armv5te -mtune=xscale -mfloat-abi=soft
+
+CFLAGS  := $(ARCHFLAGS) -std=gnu99 -O2 -fcommon -Wall -Wno-unused \
+           -Isrc -Isrc/soft
+LDFLAGS := -static -lm
+
+# ── sources ──────────────────────────────────────────────────────────────
+
+SOFT_SRCS := src/soft/raster.c src/soft/soft_math.c
+
+# ── host harness ─────────────────────────────────────────────────────────
+#
+# The rasterizer is developed against this, not against hardware: the
+# device has no display we can screenshot, and a cross-compile plus
+# deploy per change would make iterating on a renderer impractical. It
+# writes a PPM so the output can be diffed and eyeballed.
+
+HOST_CC     := gcc
+HOST_CFLAGS := -std=gnu99 -O2 -g -Wall -Wno-unused -Isrc -Isrc/soft
+TEST_BIN    := test-soft
+
+.PHONY: all assets test run clean check-toolchain
+
+all: test
+
+assets:
+	python3 tools/mkassets.py
+
+$(TEST_BIN): $(SOFT_SRCS) src/soft/test_soft.c
+	$(HOST_CC) $(HOST_CFLAGS) -o $@ $^ -lm
+	@echo "Built $@ (host)"
+
+test: $(TEST_BIN)
+
+# 50 frames, so the timing line is not dominated by startup. Host fps is
+# only meaningful as a RELATIVE measure while optimising -- this machine
+# has an FPU and a much larger cache than the target.
+run: $(TEST_BIN)
+	./$(TEST_BIN) /tmp/otcraft-frame.ppm 50
+
+check-toolchain:
+	@if [ -x "$(CC)" ]; then \
+		echo "Toolchain OK: $(CC)"; \
+		$(CC) --version | head -1; \
+		echo 'int main(void){return 0;}' > /tmp/eabi-probe.c; \
+		$(CC) $(ARCHFLAGS) -static -o /tmp/eabi-probe /tmp/eabi-probe.c; \
+		readelf -h /tmp/eabi-probe | grep -q 'EABI' \
+			|| { echo "ERROR: non-EABI output"; exit 1; }; \
+		echo "(EABI flag present -- correct)"; \
+	else \
+		echo "ERROR: toolchain not found at $(CROSS_PATH)/"; \
+		echo "Build the piko toolchain first."; \
+		exit 1; \
+	fi
+
+clean:
+	rm -f $(TEST_BIN)
+	rm -rf obj
