@@ -98,13 +98,59 @@ at.
 — the Quake approach. Block faces are small on screen; full
 per-pixel divide is not affordable.
 
-**Budget (estimate, not yet measured).** 76,800 px at ~2× overdraw is
-~150k shaded px/frame. At a target 10–15 fps that is 1.5–2.3M px/s. On
-400 MHz that allows ~170–260 cycles/px, against an expected inner loop
-of ~10–15. The headroom is real but it is spent on the 640×480 blit
-(153,600 32-bit stores/frame to slow framebuffer memory) and on vertex
-transform, so the triangle count is what actually needs watching —
-target a few thousand per frame, not tens of thousands.
+### Measured on the device, 2026-08-01
+
+The first hardware run (`otcraft-smoke`, 4,012-triangle scene) came in at
+**2.67 fps**, against an estimate of 10–15. The estimate was wrong and
+the way it was wrong is the useful part:
+
+| phase | ms/frame | share |
+|---|---|---|
+| raster | **261.8** | 70% |
+| present (640×480 blit) | 107.4 | 29% |
+| sky | 3.9 | 1% |
+| hud | 0.3 | — |
+| *accounted* | *373.5 of 374.2* | *99.8%* |
+
+Only ~36k pixels pass the depth test per frame — under half a screen —
+so this is **not** the fill-rate ceiling the estimate assumed. It works
+out to ~2,900 cycles per shaded pixel on a 395 BogoMIPS part, where a
+span loop should be 10–15.
+
+Two candidate causes were ruled out by disassembling the object:
+`fx_mul` compiles to **78 `SMULL` instructions** with no 64-bit multiply
+helper calls, and there are only three divider calls in the whole
+translation unit, none of them in the inner loop. The codegen is fine.
+
+What is left is the **per-pixel dependent load chain**, which is where a
+software renderer on this class of machine actually dies:
+
+```
+depth_buf[x] -> atlas[v][u] -> colormap[light][texel] -> fogmap[step][c]
+   150 KB         64 KB            16 KB                    4 KB
+```
+
+Each load depends on the result of the previous one, the combined
+working set is far past the 32 KB D-cache, and this core is in-order
+with no prefetch — so every miss stalls the whole pipeline. On top of
+that the fog path does a **64-bit `fx_div` per pixel** to recover
+distance from 1/w.
+
+The fixes that follow from this, in order of expected value:
+
+1. **Delete the per-pixel divide.** Fog needs a step index, not a
+   distance — index a LUT by the depth value directly.
+2. **Apply fog per subspan, not per pixel.** It varies slowly over 16
+   pixels; this removes one dependent load from every pixel.
+3. **Shrink the sampled working set.** A chunk uses a handful of tiles,
+   not the whole 64 KB atlas.
+4. **The 107 ms present is a separate, harder problem** — 614 KB per
+   frame into w100 memory at ~5.7 MB/s. It puts a hard ceiling near 9 fps
+   no matter how fast the raster gets, so a dirty-region or
+   reduced-resolution blit will eventually be needed.
+
+Triangle count still needs watching, but it is not the current
+bottleneck.
 
 ## Input
 
