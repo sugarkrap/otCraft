@@ -254,6 +254,11 @@ int main(int argc, char **argv)
 
         if (frames > 0) {
             double acc = t_sky + t_raster + t_hud + t_present;
+            double t_blit = 0, t_flip = 0;
+
+            plat_present_timing(&t_blit, &t_flip);
+            printf("smoke: present split (ms) -- blit %.1f  pageflip %.1f\n",
+                   1000 * t_blit / frames, 1000 * t_flip / frames);
             printf("smoke: per frame (ms) -- sky %.1f  raster %.1f  "
                    "hud %.1f  present %.1f  accounted %.1f of %.1f\n",
                    1000 * t_sky / frames, 1000 * t_raster / frames,

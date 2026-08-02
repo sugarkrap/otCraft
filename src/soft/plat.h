@@ -130,4 +130,13 @@ void plat_get_look_delta(int *dx, int *dy);
 /* Monotonic seconds since plat_init(). */
 double plat_time(void);
 
+/*
+ * Splits the cost of plat_present() into the palette blit and the page
+ * flip. These are attacked completely differently -- the blit shrinks if
+ * fewer pixels are written, while the flip is a vblank wait that does
+ * not care how much was drawn -- so optimising the wrong one is easy
+ * without this. Seconds, accumulated since plat_init().
+ */
+void plat_present_timing(double *blit, double *flip);
+
 #endif /* SOFT_PLAT_H */

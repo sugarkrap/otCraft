@@ -542,13 +542,24 @@ int plat_init(const uint8_t *palette)
 
 /* ── present ────────────────────────────────────────────────────────── */
 
+static double t_blit_acc, t_flip_acc;
+
+void plat_present_timing(double *blit, double *flip)
+{
+    if (blit) *blit = t_blit_acc;
+    if (flip) *flip = t_flip_acc;
+}
+
 void plat_present(const uint8_t *indices)
 {
     uint8_t *base;
     int y;
+    double t0;
 
     if (fb_mem == MAP_FAILED)
         return;
+
+    t0 = now_seconds();
 
     base = (uint8_t *)fb_mem + (page_flip ? back_page * page_bytes : 0);
 
@@ -598,6 +609,9 @@ void plat_present(const uint8_t *indices)
         }
     }
 
+    t_blit_acc += now_seconds() - t0;
+    t0 = now_seconds();
+
     if (page_flip) {
         struct fb_var_screeninfo pan;
 
@@ -615,6 +629,8 @@ void plat_present(const uint8_t *indices)
             page_flip = 0;
         }
     }
+
+    t_flip_acc += now_seconds() - t0;
 }
 
 /*

@@ -198,7 +198,43 @@ costing more than the geometry culling saves it.
 
 So a tight draw distance is worth having for the memory and mesh-build
 savings it will bring once chunks exist, but it is not a rendering
-optimisation. The two things that actually move the frame time are
+optimisation.
+
+### The present is all blit, and the blit is bus-bound
+
+Splitting `plat_present()` on the device:
+
+| | ms/frame |
+|---|---|
+| palette blit | **58.6** |
+| page flip (`FBIOPAN_DISPLAY`) | **0.1** |
+
+The vblank wait is free — w100fb's pan does not block in practice, so
+double buffering costs nothing and the earlier worry about it was
+misplaced. All of the present is the blit.
+
+614,400 bytes in 58.6 ms is **10.5 MB/s**, or ~152 cycles per 32-bit
+store at 395 BogoMIPS. A store loop does not take 152 cycles because the
+loop is bad; it takes that long because each write goes uncached and
+unbuffered across the PXA static memory bus to the w100 and stalls. This
+is a **bus limit, not a code limit**, which is why no amount of culling
+moved it in the sweep above.
+
+Three ways at it, cheapest first:
+
+1. **Write fewer pixels.** Cost is strictly proportional, so a reduced
+   viewport (otQuake's `viewsize`/`r_dynamicscale`) buys back time
+   linearly — and unlike draw distance, this cuts raster *and* present
+   together.
+2. **Burst the writes.** Sequential `STM` (store-multiple) can coalesce
+   into bus bursts where single `STR`s cannot. Worth checking what the
+   compiler currently emits for the blit loop.
+3. **Fix the mapping.** If `w100fb` maps the framebuffer without
+   write-combining, buffered writes would let stores merge instead of
+   stalling one at a time. That is a kernel change in `piko` rather than
+   here, and it would speed up every framebuffer application on the
+   device, otQuake included — so it is the highest-leverage fix even
+   though it is not in this repo. The two things that actually move the frame time are
 unchanged: the **per-pixel work** (kill the per-pixel divide, apply fog
 per subspan) and the **fixed ~52 ms present**, which no amount of
 culling touches.
