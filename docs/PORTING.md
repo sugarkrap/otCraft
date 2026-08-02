@@ -100,21 +100,29 @@ per-pixel divide is not affordable.
 
 ### Measured on the device, 2026-08-01
 
-The first hardware run (`otcraft-smoke`, 4,012-triangle scene) came in at
-**2.67 fps**, against an estimate of 10–15. The estimate was wrong and
-the way it was wrong is the useful part:
+`otcraft-smoke`, 4,012-triangle scene, on an otherwise idle board:
+**5.25 fps** (range 2.73–5.86), against an estimate of 10–15.
 
 | phase | ms/frame | share |
 |---|---|---|
-| raster | **261.8** | 70% |
-| present (640×480 blit) | 107.4 | 29% |
-| sky | 3.9 | 1% |
+| raster | **131.6** | 69% |
+| present (640×480 blit) | 56.6 | 30% |
+| sky | 1.8 | 1% |
 | hud | 0.3 | — |
-| *accounted* | *373.5 of 374.2* | *99.8%* |
+| *accounted* | *190.4 of 190.5* | *99.9%* |
+
+> **Check what else is running before believing a number.** The first
+> run of this measured 2.67 fps — exactly half — because otQuake was
+> running at the same time. This board is a single in-order core and
+> both programs want the CPU *and* `/dev/fb0`, so they simply halve each
+> other. It was missed because the process list was inspected with
+> `ps | head`, which on this busybox shows only kernel threads and hides
+> every application. Use `ps | grep -v '\['`, and treat `/proc/loadavg`
+> above ~0.1 on an idle board as a reason to look harder.
 
 Only ~36k pixels pass the depth test per frame — under half a screen —
 so this is **not** the fill-rate ceiling the estimate assumed. It works
-out to ~2,900 cycles per shaded pixel on a 395 BogoMIPS part, where a
+out to ~1,450 cycles per shaded pixel on a 395 BogoMIPS part, where a
 span loop should be 10–15.
 
 Two candidate causes were ruled out by disassembling the object:
@@ -144,10 +152,18 @@ The fixes that follow from this, in order of expected value:
    pixels; this removes one dependent load from every pixel.
 3. **Shrink the sampled working set.** A chunk uses a handful of tiles,
    not the whole 64 KB atlas.
-4. **The 107 ms present is a separate, harder problem** — 614 KB per
-   frame into w100 memory at ~5.7 MB/s. It puts a hard ceiling near 9 fps
-   no matter how fast the raster gets, so a dirty-region or
+4. **The 56.6 ms present is a separate, harder problem** — 614 KB per
+   frame into w100 memory at ~10.9 MB/s. It puts a hard ceiling near
+   18 fps no matter how fast the raster gets, so a dirty-region or
    reduced-resolution blit will eventually be needed.
+
+Confirmed on the device that the scene renders correctly on the panel —
+textures, depth and fog all read as they do in the host reference. The
+image was verified by eye rather than captured, because `fbgrab` is not
+on this board and `/dev/fb0` does not implement `read()` (`dd` returns
+zero bytes). A screenshot route still needs building; the cheapest is
+for the game to dump its own 320×240 index buffer and expand it through
+the palette on the host.
 
 Triangle count still needs watching, but it is not the current
 bottleneck.
