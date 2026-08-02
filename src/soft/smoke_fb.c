@@ -176,7 +176,7 @@ int main(int argc, char **argv)
 
         double ta, tb;
 
-        demo_camera((float)elapsed, &mvp);
+        demo_camera_player((float)elapsed, &mvp);
 
         soft_begin_frame();
 

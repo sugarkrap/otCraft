@@ -231,6 +231,36 @@ void demo_camera(float t, soft_mat4 *out)
     soft_mat4_from_float(out, mvp);
 }
 
+void demo_camera_player(float t, soft_mat4 *out)
+{
+    /* Middle of the world, on top of whatever the terrain does there --
+     * same expression demo_build() used, so the eye sits on the ground
+     * rather than in it. */
+    const float cx = 12.0f, cz = 12.0f;
+    float ground = 3.0f + 2.0f * sinf(cx * 0.4f) + 2.0f * cosf(cz * 0.35f);
+    float proj[16], view[16], mvp[16];
+    float eye[3], at[3];
+    float yaw = t * 0.6f;
+
+    if (ground < 1.0f)
+        ground = 1.0f;
+
+    eye[0] = cx;
+    eye[1] = ground + 1.7f;          /* eye height above the block */
+    eye[2] = cz;
+
+    /* Look level, turning on the spot, so every frame sweeps a different
+     * slice of the world through the cull. */
+    at[0] = eye[0] + cosf(yaw);
+    at[1] = eye[1] - 0.15f;
+    at[2] = eye[2] + sinf(yaw);
+
+    mat_perspective(proj, 65.0f, (float)SOFT_W / SOFT_H, 0.125f, 128.0f);
+    mat_lookat(view, eye, at);
+    mat_mul(mvp, proj, view);
+    soft_mat4_from_float(out, mvp);
+}
+
 int demo_ink(const uint8_t *palette)
 {
     int i, ink = 0, best = 1 << 30;

@@ -25,6 +25,15 @@ int             demo_mesh_count(void);
  */
 void demo_camera(float t, soft_mat4 *out);
 
+/*
+ * First-person camera: standing on the terrain at eye height, turning on
+ * the spot. This is the view the game actually has, and the only one a
+ * short draw distance can be measured against -- demo_camera() orbits
+ * roughly 15 blocks clear of the terrain, so any cull tighter than that
+ * removes the whole world and measures an empty screen.
+ */
+void demo_camera_player(float t, soft_mat4 *out);
+
 /* Nearest palette entry to white, for HUD text and the crosshair. */
 int demo_ink(const uint8_t *palette);
 

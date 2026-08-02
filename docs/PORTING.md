@@ -168,6 +168,41 @@ the palette on the host.
 Triangle count still needs watching, but it is not the current
 bottleneck.
 
+### Draw distance is not the lever it looks like
+
+Measured with the first-person camera (standing in the world, turning on
+the spot — the orbiting camera sits ~15 blocks clear of the terrain, so
+any cull tighter than that would remove everything and measure an empty
+screen):
+
+| draw distance | fps | tris drawn | pixels | raster ms | present ms |
+|---|---|---|---|---|---|
+| 4 | **6.33** | 68 | 46,820 | 103.9 | 51.9 |
+| 8 | 4.58 | 175 | 71,441 | 151.9 | 63.5 |
+| 12 | 4.11 | 210 | 74,504 | 176.9 | 64.2 |
+| 16 | 5.42 | 224 | 75,297 | 130.1 | 52.1 |
+| 24 | 5.42 | 224 | 75,283 | 130.1 | 52.0 |
+
+Going from 24 blocks to 4 discards **94% of the geometry for 17% more
+frames**. The pixel column explains it: triangles fall 3.3×, pixels only
+1.6×. Standing inside a world, whatever is nearest fills the screen
+regardless — a short draw distance swaps far geometry for near geometry
+rather than removing coverage. **Fill is the cost, not triangle count.**
+
+The curve is also **not monotonic**: 12 blocks is slower than 24. Fog
+near/far scale with draw distance, so pulling it in puts a larger share
+of pixels inside the fog band, and every one of those takes an extra
+dependent `fogmap` load. Past ~16 blocks most visible pixels fall short
+of where fog starts and skip that load entirely. The fog is currently
+costing more than the geometry culling saves it.
+
+So a tight draw distance is worth having for the memory and mesh-build
+savings it will bring once chunks exist, but it is not a rendering
+optimisation. The two things that actually move the frame time are
+unchanged: the **per-pixel work** (kill the per-pixel divide, apply fog
+per subspan) and the **fixed ~52 ms present**, which no amount of
+culling touches.
+
 ## Input
 
 The device has a thumb matrix keyboard and a resistive touchscreen
