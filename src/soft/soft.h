@@ -171,6 +171,7 @@ void soft_draw_rect(int x, int y, int w, int h, uint8_t index);
 
 typedef struct {
     unsigned tris_in;        /* submitted */
+    unsigned tris_fogged;    /* skipped: entirely beyond the fog far plane */
     unsigned tris_drawn;     /* survived cull + clip */
     unsigned spans;
     unsigned pixels;         /* depth-test passes */

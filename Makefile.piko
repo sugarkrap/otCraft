@@ -33,7 +33,17 @@ LDFLAGS := -static -lm
 
 # ── sources ──────────────────────────────────────────────────────────────
 
-SOFT_SRCS := src/soft/raster.c src/soft/soft_math.c
+SOFT_SRCS := src/soft/raster.c src/soft/soft_math.c src/soft/demo_scene.c
+
+# ── on-device smoke test ─────────────────────────────────────────────────
+#
+# Static, because a dynamically linked binary has to match whatever is in
+# the device's /lib at the moment, and this is the thing we run to find
+# out whether the device works at all -- it should not be able to fail
+# for a linking reason.
+
+SMOKE_SRCS := $(SOFT_SRCS) src/soft/plat_fb.c src/soft/smoke_fb.c
+SMOKE_BIN  := otcraft-smoke
 
 # ── host harness ─────────────────────────────────────────────────────────
 #
@@ -46,9 +56,22 @@ HOST_CC     := gcc
 HOST_CFLAGS := -std=gnu99 -O2 -g -Wall -Wno-unused -Isrc -Isrc/soft
 TEST_BIN    := test-soft
 
-.PHONY: all assets test run clean check-toolchain
+.PHONY: all assets test run smoke package clean check-toolchain
 
 all: test
+
+$(SMOKE_BIN): $(SMOKE_SRCS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(STRIP) $@
+	@echo "Built $@ ($$(wc -c < $@) bytes, ARM EABI static)"
+
+smoke: $(SMOKE_BIN)
+
+# Stages the smoke binary plus its assets and hands the tree to piko's
+# make-ipk.sh. Architecture must be "piko"; "arm" means Sharp-era OABI
+# and the device refuses it on purpose.
+package: $(SMOKE_BIN) assets
+	@sh tools/build-package.sh
 
 assets:
 	python3 tools/mkassets.py

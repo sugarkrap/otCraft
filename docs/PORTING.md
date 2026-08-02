@@ -98,13 +98,146 @@ at.
 — the Quake approach. Block faces are small on screen; full
 per-pixel divide is not affordable.
 
-**Budget (estimate, not yet measured).** 76,800 px at ~2× overdraw is
-~150k shaded px/frame. At a target 10–15 fps that is 1.5–2.3M px/s. On
-400 MHz that allows ~170–260 cycles/px, against an expected inner loop
-of ~10–15. The headroom is real but it is spent on the 640×480 blit
-(153,600 32-bit stores/frame to slow framebuffer memory) and on vertex
-transform, so the triangle count is what actually needs watching —
-target a few thousand per frame, not tens of thousands.
+### Measured on the device, 2026-08-01
+
+`otcraft-smoke`, 4,012-triangle scene, on an otherwise idle board:
+**5.25 fps** (range 2.73–5.86), against an estimate of 10–15.
+
+| phase | ms/frame | share |
+|---|---|---|
+| raster | **131.6** | 69% |
+| present (640×480 blit) | 56.6 | 30% |
+| sky | 1.8 | 1% |
+| hud | 0.3 | — |
+| *accounted* | *190.4 of 190.5* | *99.9%* |
+
+> **Check what else is running before believing a number.** The first
+> run of this measured 2.67 fps — exactly half — because otQuake was
+> running at the same time. This board is a single in-order core and
+> both programs want the CPU *and* `/dev/fb0`, so they simply halve each
+> other. It was missed because the process list was inspected with
+> `ps | head`, which on this busybox shows only kernel threads and hides
+> every application. Use `ps | grep -v '\['`, and treat `/proc/loadavg`
+> above ~0.1 on an idle board as a reason to look harder.
+
+Only ~36k pixels pass the depth test per frame — under half a screen —
+so this is **not** the fill-rate ceiling the estimate assumed. It works
+out to ~1,450 cycles per shaded pixel on a 395 BogoMIPS part, where a
+span loop should be 10–15.
+
+Two candidate causes were ruled out by disassembling the object:
+`fx_mul` compiles to **78 `SMULL` instructions** with no 64-bit multiply
+helper calls, and there are only three divider calls in the whole
+translation unit, none of them in the inner loop. The codegen is fine.
+
+What is left is the **per-pixel dependent load chain**, which is where a
+software renderer on this class of machine actually dies:
+
+```
+depth_buf[x] -> atlas[v][u] -> colormap[light][texel] -> fogmap[step][c]
+   150 KB         64 KB            16 KB                    4 KB
+```
+
+Each load depends on the result of the previous one, the combined
+working set is far past the 32 KB D-cache, and this core is in-order
+with no prefetch — so every miss stalls the whole pipeline. On top of
+that the fog path does a **64-bit `fx_div` per pixel** to recover
+distance from 1/w.
+
+The fixes that follow from this, in order of expected value:
+
+1. **Delete the per-pixel divide.** Fog needs a step index, not a
+   distance — index a LUT by the depth value directly.
+2. **Apply fog per subspan, not per pixel.** It varies slowly over 16
+   pixels; this removes one dependent load from every pixel.
+3. **Shrink the sampled working set.** A chunk uses a handful of tiles,
+   not the whole 64 KB atlas.
+4. **The 56.6 ms present is a separate, harder problem** — 614 KB per
+   frame into w100 memory at ~10.9 MB/s. It puts a hard ceiling near
+   18 fps no matter how fast the raster gets, so a dirty-region or
+   reduced-resolution blit will eventually be needed.
+
+Confirmed on the device that the scene renders correctly on the panel —
+textures, depth and fog all read as they do in the host reference. The
+image was verified by eye rather than captured, because `fbgrab` is not
+on this board and `/dev/fb0` does not implement `read()` (`dd` returns
+zero bytes). A screenshot route still needs building; the cheapest is
+for the game to dump its own 320×240 index buffer and expand it through
+the palette on the host.
+
+Triangle count still needs watching, but it is not the current
+bottleneck.
+
+### Draw distance is not the lever it looks like
+
+Measured with the first-person camera (standing in the world, turning on
+the spot — the orbiting camera sits ~15 blocks clear of the terrain, so
+any cull tighter than that would remove everything and measure an empty
+screen):
+
+| draw distance | fps | tris drawn | pixels | raster ms | present ms |
+|---|---|---|---|---|---|
+| 4 | **6.33** | 68 | 46,820 | 103.9 | 51.9 |
+| 8 | 4.58 | 175 | 71,441 | 151.9 | 63.5 |
+| 12 | 4.11 | 210 | 74,504 | 176.9 | 64.2 |
+| 16 | 5.42 | 224 | 75,297 | 130.1 | 52.1 |
+| 24 | 5.42 | 224 | 75,283 | 130.1 | 52.0 |
+
+Going from 24 blocks to 4 discards **94% of the geometry for 17% more
+frames**. The pixel column explains it: triangles fall 3.3×, pixels only
+1.6×. Standing inside a world, whatever is nearest fills the screen
+regardless — a short draw distance swaps far geometry for near geometry
+rather than removing coverage. **Fill is the cost, not triangle count.**
+
+The curve is also **not monotonic**: 12 blocks is slower than 24. Fog
+near/far scale with draw distance, so pulling it in puts a larger share
+of pixels inside the fog band, and every one of those takes an extra
+dependent `fogmap` load. Past ~16 blocks most visible pixels fall short
+of where fog starts and skip that load entirely. The fog is currently
+costing more than the geometry culling saves it.
+
+So a tight draw distance is worth having for the memory and mesh-build
+savings it will bring once chunks exist, but it is not a rendering
+optimisation.
+
+### The present is all blit, and the blit is bus-bound
+
+Splitting `plat_present()` on the device:
+
+| | ms/frame |
+|---|---|
+| palette blit | **58.6** |
+| page flip (`FBIOPAN_DISPLAY`) | **0.1** |
+
+The vblank wait is free — w100fb's pan does not block in practice, so
+double buffering costs nothing and the earlier worry about it was
+misplaced. All of the present is the blit.
+
+614,400 bytes in 58.6 ms is **10.5 MB/s**, or ~152 cycles per 32-bit
+store at 395 BogoMIPS. A store loop does not take 152 cycles because the
+loop is bad; it takes that long because each write goes uncached and
+unbuffered across the PXA static memory bus to the w100 and stalls. This
+is a **bus limit, not a code limit**, which is why no amount of culling
+moved it in the sweep above.
+
+Three ways at it, cheapest first:
+
+1. **Write fewer pixels.** Cost is strictly proportional, so a reduced
+   viewport (otQuake's `viewsize`/`r_dynamicscale`) buys back time
+   linearly — and unlike draw distance, this cuts raster *and* present
+   together.
+2. **Burst the writes.** Sequential `STM` (store-multiple) can coalesce
+   into bus bursts where single `STR`s cannot. Worth checking what the
+   compiler currently emits for the blit loop.
+3. **Fix the mapping.** If `w100fb` maps the framebuffer without
+   write-combining, buffered writes would let stores merge instead of
+   stalling one at a time. That is a kernel change in `piko` rather than
+   here, and it would speed up every framebuffer application on the
+   device, otQuake included — so it is the highest-leverage fix even
+   though it is not in this repo. The two things that actually move the frame time are
+unchanged: the **per-pixel work** (kill the per-pixel divide, apply fog
+per subspan) and the **fixed ~52 ms present**, which no amount of
+culling touches.
 
 ## Input
 
@@ -136,6 +269,34 @@ constraint from `piko/AGENTS.md`: this keyboard **cannot type** `/`, `:`,
 `[`, `]` or `|`. Craft binds `/` to the command prompt and `` ` `` to
 sign entry — both are unreachable and are dropped rather than rebound
 into something equally awkward.
+
+### This must be launched through `matchbox-fbrun`
+
+Not optional, and not merely about performance. **Xfbdev holds an
+`EVIOCGRAB` on the keyboard and the touchscreen**, so a framebuffer
+program started while the desktop is up renders perfectly and receives
+no input at all — it looks alive and is completely uncontrollable.
+
+`piko`'s `matchbox-fbrun` is the one place that knows how to hand the
+machine over and take it back; it stops the graphical session, runs the
+program with the console to itself, and restores everything
+unconditionally. otQuake's `quake` wrapper is the model to copy.
+
+> The first on-device run of `otcraft-smoke` reported zero key and pen
+> events, and that was misread as "nobody touched the device". It was
+> the grab. **The input model is still unproven** — the stylus look and
+> the Ctrl/AltGr clicks have never actually been exercised on hardware.
+
+Two related hazards, both of which the platform layer now handles:
+
+- **Restore the pan offset on exit.** Page flipping leaves the panel
+  showing whichever page was panned to last. Exiting without resetting
+  it leaves X drawing into page 0 while the panel displays page 1 —
+  observed for real, `/sys/class/graphics/fb0/pan` reading `0,480` after
+  a run. It looks like a frozen device rather than a program that quit.
+- **Do not run it alongside another framebuffer app.** Two of them
+  halve each other on this single in-order core, and both will fight
+  over the pan offset.
 
 ## What gets dropped
 

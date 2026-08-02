@@ -59,6 +59,20 @@ static int page_flip = 0;
 static int back_page = 1;
 static int page_bytes;
 
+/*
+ * The framebuffer's geometry exactly as we found it.
+ *
+ * Page flipping leaves the panel showing whichever page we panned to
+ * last, and asks the driver for a doubled yres_virtual. Neither is ours
+ * to keep: exiting without putting both back leaves X drawing into page
+ * 0 while the panel displays page 1, which looks like a frozen or
+ * corrupted device rather than a program that has quit. Observed for
+ * real -- /sys/class/graphics/fb0/pan read "0,480" after the first
+ * on-device run.
+ */
+static struct fb_var_screeninfo orig_var;
+static int orig_var_valid = 0;
+
 static uint16_t palette16[256];
 
 /* VT ownership, so fbcon stops drawing over us. */
@@ -367,6 +381,24 @@ void plat_shutdown(void)
 {
     int i;
 
+    /*
+     * Put the panel back on page 0 and undo the doubled virtual
+     * resolution, while the fd is still open. Unconditional on purpose:
+     * doing this only on a clean exit is how a crash leaves a device
+     * that looks bricked.
+     */
+    if (fb_fd >= 0 && orig_var_valid) {
+        struct fb_var_screeninfo var = orig_var;
+
+        var.xoffset = 0;
+        var.yoffset = 0;
+        if (ioctl(fb_fd, FBIOPAN_DISPLAY, &var) < 0)
+            ioctl(fb_fd, FBIOPUT_VSCREENINFO, &var);
+        else if (page_flip)
+            ioctl(fb_fd, FBIOPUT_VSCREENINFO, &var);
+        page_flip = 0;
+    }
+
     tty_set_graphics(0);
     if (tty_fd >= 0) {
         close(tty_fd);
@@ -426,6 +458,10 @@ static int setup_framebuffer(void)
         perror("plat_fb: screeninfo");
         return -1;
     }
+
+    /* Keep a pristine copy before we ask for anything. */
+    orig_var = var;
+    orig_var_valid = 1;
 
     fb_width = var.xres;
     fb_height = var.yres;
@@ -506,13 +542,24 @@ int plat_init(const uint8_t *palette)
 
 /* ── present ────────────────────────────────────────────────────────── */
 
+static double t_blit_acc, t_flip_acc;
+
+void plat_present_timing(double *blit, double *flip)
+{
+    if (blit) *blit = t_blit_acc;
+    if (flip) *flip = t_flip_acc;
+}
+
 void plat_present(const uint8_t *indices)
 {
     uint8_t *base;
     int y;
+    double t0;
 
     if (fb_mem == MAP_FAILED)
         return;
+
+    t0 = now_seconds();
 
     base = (uint8_t *)fb_mem + (page_flip ? back_page * page_bytes : 0);
 
@@ -522,7 +569,23 @@ void plat_present(const uint8_t *indices)
          * Each source pixel becomes a pair of identical shorts written as
          * ONE 32-bit store, which halves the number of writes into
          * framebuffer memory -- and those writes, not the palette lookup,
-         * are what this loop is actually limited by.
+         * are what this loop is limited by.
+         *
+         * The two output rows are written as SEPARATE sequential passes,
+         * which looks wasteful (the palette is looked up twice per source
+         * pixel) and is not.
+         *
+         * w100fb maps the framebuffer write-combining -- see
+         * w100fb_mmap() in piko's modules/w100/. Write combining only
+         * merges writes into bus bursts while they stay sequential.
+         * Interleaving `d0[x]` and `d1[x]` in one loop alternates between
+         * two addresses a whole scanline (1280 bytes) apart, so the write
+         * buffer has to flush on every single pair and every store goes
+         * to the bus alone. Two clean streams let it batch instead.
+         *
+         * Recomputing the palette lookup is a cached L1 hit; a stalled
+         * store to the w100 across the PXA static bus measured ~152
+         * cycles. Trading the former for fewer of the latter is not close.
          */
         for (y = 0; y < SOFT_H; y++) {
             const uint8_t *src = indices + y * SOFT_W;
@@ -532,9 +595,11 @@ void plat_present(const uint8_t *indices)
 
             for (x = 0; x < SOFT_W; x++) {
                 uint32_t c = palette16[src[x]];
-                c |= c << 16;
-                d0[x] = c;
-                d1[x] = c;
+                d0[x] = c | (c << 16);
+            }
+            for (x = 0; x < SOFT_W; x++) {
+                uint32_t c = palette16[src[x]];
+                d1[x] = c | (c << 16);
             }
         }
     } else {
@@ -562,6 +627,9 @@ void plat_present(const uint8_t *indices)
         }
     }
 
+    t_blit_acc += now_seconds() - t0;
+    t0 = now_seconds();
+
     if (page_flip) {
         struct fb_var_screeninfo pan;
 
@@ -579,6 +647,8 @@ void plat_present(const uint8_t *indices)
             page_flip = 0;
         }
     }
+
+    t_flip_acc += now_seconds() - t0;
 }
 
 /*
