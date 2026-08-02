@@ -59,6 +59,20 @@ static int page_flip = 0;
 static int back_page = 1;
 static int page_bytes;
 
+/*
+ * The framebuffer's geometry exactly as we found it.
+ *
+ * Page flipping leaves the panel showing whichever page we panned to
+ * last, and asks the driver for a doubled yres_virtual. Neither is ours
+ * to keep: exiting without putting both back leaves X drawing into page
+ * 0 while the panel displays page 1, which looks like a frozen or
+ * corrupted device rather than a program that has quit. Observed for
+ * real -- /sys/class/graphics/fb0/pan read "0,480" after the first
+ * on-device run.
+ */
+static struct fb_var_screeninfo orig_var;
+static int orig_var_valid = 0;
+
 static uint16_t palette16[256];
 
 /* VT ownership, so fbcon stops drawing over us. */
@@ -367,6 +381,24 @@ void plat_shutdown(void)
 {
     int i;
 
+    /*
+     * Put the panel back on page 0 and undo the doubled virtual
+     * resolution, while the fd is still open. Unconditional on purpose:
+     * doing this only on a clean exit is how a crash leaves a device
+     * that looks bricked.
+     */
+    if (fb_fd >= 0 && orig_var_valid) {
+        struct fb_var_screeninfo var = orig_var;
+
+        var.xoffset = 0;
+        var.yoffset = 0;
+        if (ioctl(fb_fd, FBIOPAN_DISPLAY, &var) < 0)
+            ioctl(fb_fd, FBIOPUT_VSCREENINFO, &var);
+        else if (page_flip)
+            ioctl(fb_fd, FBIOPUT_VSCREENINFO, &var);
+        page_flip = 0;
+    }
+
     tty_set_graphics(0);
     if (tty_fd >= 0) {
         close(tty_fd);
@@ -426,6 +458,10 @@ static int setup_framebuffer(void)
         perror("plat_fb: screeninfo");
         return -1;
     }
+
+    /* Keep a pristine copy before we ask for anything. */
+    orig_var = var;
+    orig_var_valid = 1;
 
     fb_width = var.xres;
     fb_height = var.yres;

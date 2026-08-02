@@ -199,6 +199,34 @@ constraint from `piko/AGENTS.md`: this keyboard **cannot type** `/`, `:`,
 sign entry — both are unreachable and are dropped rather than rebound
 into something equally awkward.
 
+### This must be launched through `matchbox-fbrun`
+
+Not optional, and not merely about performance. **Xfbdev holds an
+`EVIOCGRAB` on the keyboard and the touchscreen**, so a framebuffer
+program started while the desktop is up renders perfectly and receives
+no input at all — it looks alive and is completely uncontrollable.
+
+`piko`'s `matchbox-fbrun` is the one place that knows how to hand the
+machine over and take it back; it stops the graphical session, runs the
+program with the console to itself, and restores everything
+unconditionally. otQuake's `quake` wrapper is the model to copy.
+
+> The first on-device run of `otcraft-smoke` reported zero key and pen
+> events, and that was misread as "nobody touched the device". It was
+> the grab. **The input model is still unproven** — the stylus look and
+> the Ctrl/AltGr clicks have never actually been exercised on hardware.
+
+Two related hazards, both of which the platform layer now handles:
+
+- **Restore the pan offset on exit.** Page flipping leaves the panel
+  showing whichever page was panned to last. Exiting without resetting
+  it leaves X drawing into page 0 while the panel displays page 1 —
+  observed for real, `/sys/class/graphics/fb0/pan` reading `0,480` after
+  a run. It looks like a frozen device rather than a program that quit.
+- **Do not run it alongside another framebuffer app.** Two of them
+  halve each other on this single in-order core, and both will fight
+  over the pan offset.
+
 ## What gets dropped
 
 Removed outright, for RAM, code size, or because the input method cannot

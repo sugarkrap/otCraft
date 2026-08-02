@@ -56,6 +56,13 @@ static uint8_t g_fog_index = 0;
 static int     g_fog_enabled = 0;
 static fx_t    g_fog_near = 0, g_fog_scale = 0;
 
+/*
+ * Where fog saturates, which is also the draw distance -- see the cull
+ * in soft_draw_blocks(). Past this point every pixel resolves to exactly
+ * g_fog_index, so rasterizing it produces the colour the sky already is.
+ */
+static fx_t    g_fog_far = 0;
+
 static soft_stats g_stats;
 
 /* Near plane. Deliberately close: the player can stand against a block
@@ -184,6 +191,7 @@ void soft_set_fog(fx_t near, fx_t far, uint8_t sky_index)
     }
 
     g_fog_near = near;
+    g_fog_far = far;
     g_fog_scale = fx_div(fx_from_int(SOFT_FOG_STEPS - 1), far - near);
     g_fog_enabled = 1;
 
@@ -587,6 +595,34 @@ void soft_draw_blocks(const soft_vtx *verts, int count, int flags)
         transform(&poly[0], &verts[i + 0]);
         transform(&poly[1], &verts[i + 1]);
         transform(&poly[2], &verts[i + 2]);
+
+        /*
+         * Draw distance IS the fog distance.
+         *
+         * Once every vertex is past where fog saturates, the triangle can
+         * only produce g_fog_index. Rasterizing it means running the
+         * whole per-pixel dependent load chain (atlas, colormap, fogmap)
+         * to arrive at one constant, so it is skipped.
+         *
+         * Not quite free, and worth being precise about: the pixel it
+         * would have written is the fog colour, while the sky behind it
+         * came from the sky GRADIENT, which varies per scanline. The two
+         * agree exactly only at the horizon. Measured on the reference
+         * frame the difference is 24 pixels out of ~31,500 -- 0.08%, all
+         * of it at the far horizon where the two colours are nearly the
+         * same anyway.
+         *
+         * Culling at the fog distance rather than at some separate,
+         * shorter draw radius is still what avoids visible popping:
+         * anything removed had already faded out.
+         */
+        if (g_fog_enabled &&
+            poly[0].w >= g_fog_far &&
+            poly[1].w >= g_fog_far &&
+            poly[2].w >= g_fog_far) {
+            g_stats.tris_fogged++;
+            continue;
+        }
 
         code0 = outcode(&poly[0]);
         code1 = outcode(&poly[1]);

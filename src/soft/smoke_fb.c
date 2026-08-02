@@ -17,7 +17,12 @@
  * board is shared, it has no serial console, and a program holding the
  * VT in graphics mode after an SSH drop would look like a hung device.
  *
- *   otcraft-smoke [seconds] [assets-dir]
+ *   otcraft-smoke [seconds] [draw-distance-blocks] [assets-dir]
+ *
+ * Draw distance is one knob because fog distance and draw distance are
+ * the same thing here -- see the cull in soft_draw_blocks(). Passing it
+ * on the command line means the right value can be found on the device
+ * by sweeping, instead of one cross-compile per guess.
  */
 
 #include <stdio.h>
@@ -30,6 +35,15 @@
 
 #define DEFAULT_SECONDS 20
 #define DEFAULT_ASSETS  "/usr/share/otcraft"
+
+/*
+ * Blocks. Craft's original RENDER_CHUNK_RADIUS of 10 at CHUNK_SIZE 32 is
+ * 320 blocks, which is not in the same universe as this hardware. Fog
+ * starts at this fraction of the far distance, so one number controls
+ * both where the haze begins and where geometry stops being drawn.
+ */
+#define DEFAULT_DRAW_BLOCKS 24
+#define FOG_START_FRACTION  0.35f
 
 static uint8_t *slurp(const char *dir, const char *name, size_t want)
 {
@@ -63,7 +77,8 @@ static uint8_t *slurp(const char *dir, const char *name, size_t want)
 int main(int argc, char **argv)
 {
     int seconds = argc > 1 ? atoi(argv[1]) : DEFAULT_SECONDS;
-    const char *dir = argc > 2 ? argv[2] : DEFAULT_ASSETS;
+    int draw_blocks = argc > 2 ? atoi(argv[2]) : DEFAULT_DRAW_BLOCKS;
+    const char *dir = argc > 3 ? argv[3] : DEFAULT_ASSETS;
 
     uint8_t *palette, *colormap, *blocks, *font, *sky;
     soft_mat4 mvp;
@@ -85,6 +100,8 @@ int main(int argc, char **argv)
 
     if (seconds <= 0)
         seconds = DEFAULT_SECONDS;
+    if (draw_blocks <= 0)
+        draw_blocks = DEFAULT_DRAW_BLOCKS;
 
     palette  = slurp(dir, "palette.bin", 768);
     colormap = slurp(dir, "colormap.bin", SOFT_LIGHT_LEVELS * 256);
@@ -112,7 +129,13 @@ int main(int argc, char **argv)
     }
 
     soft_set_daylight(FX(1.0f));
-    soft_set_fog(FX(12.0f), FX(34.0f), soft_sky_sample(FX(0.5f), FX(0.5f)));
+    {
+        fx_t far = fx_from_int(draw_blocks);
+        fx_t near = fx_mul(far, FX(FOG_START_FRACTION));
+        soft_set_fog(near, far, soft_sky_sample(FX(0.5f), FX(0.5f)));
+        printf("smoke: draw distance %d blocks (fog %d..%d)\n",
+               draw_blocks, fx_to_int(near), draw_blocks);
+    }
 
     start = plat_time();
     last_report = start;
@@ -222,8 +245,10 @@ int main(int argc, char **argv)
                frames, total, total > 0 ? frames / total : 0.0);
         if (best_fps > 0)
             printf("smoke: fps range %.2f .. %.2f\n", worst_fps, best_fps);
-        printf("smoke: last frame -- tris in %u, drawn %u, spans %u, pixels %u\n",
-               st->tris_in, st->tris_drawn, st->spans, st->pixels);
+        printf("smoke: last frame -- tris in %u, fogged %u, drawn %u, "
+               "spans %u, pixels %u\n",
+               st->tris_in, st->tris_fogged, st->tris_drawn,
+               st->spans, st->pixels);
         printf("smoke: input -- %d key events, %d actions, pen total %d,%d\n",
                keys_seen, actions, look_x, look_y);
 
